@@ -915,8 +915,7 @@ def run_trading_bot():
         
         # Load configuration from environment variables
         wallet_key = os.environ.get('WALLET_PRIVATE_KEY')
-        initial_amount_str = os.environ.get('INITIAL_AMOUNT', '50.0').replace('$', '')
-        initial_amount = float(initial_amount_str)
+        initial_amount = float(os.environ.get('INITIAL_AMOUNT', '50.0').replace('$', ''))
         
         # Create the bot
         bot = MemeStrikeUltimateXL(
