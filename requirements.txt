@@ -1,4 +1,4 @@
-solana-py
+git+https://github.com/michaelhly/solana-py.git
 base58
 requests
 python-dotenv
