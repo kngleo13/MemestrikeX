@@ -43,7 +43,7 @@ class MemeStrikeUltimateXL:
         
         Args:
             private_key: Wallet private key (required for real trading)
-            initial_amount: Initial trading amount in USD (default: $50)
+            initial_amount: Initial trading amount in USD (default: 50)
             lots: Number of trading lots to run concurrently (default: 6)
         """
         self.version = "UltimateXL-v1.5"
