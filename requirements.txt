@@ -1,5 +1,5 @@
-solana-py==0.30.2
-base58==2.1.1
-requests==2.31.0
-python-dotenv==1.0.0
-psycopg2-binary==2.9.6
+solana-py
+base58
+requests
+python-dotenv
+psycopg2-binary
