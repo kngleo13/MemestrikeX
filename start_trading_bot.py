@@ -78,6 +78,17 @@ class SolanaRealTrader:
         # Lot states (0 = available, timestamp = busy until)
         self.lots = [0] * self.num_lots
         
+        # Initialize Solana RPC endpoint with backup options - THIS MUST BE DEFINED BEFORE USING IT
+        self.solana_rpc_endpoints = [
+            "https://api.mainnet-beta.solana.com",
+            "https://solana-api.projectserum.com",
+            "https://rpc.ankr.com/solana",
+        ]
+        self.solana_rpc = self.solana_rpc_endpoints[0]
+        
+        # Initialize Jupiter API
+        self.jupiter_api = "https://quote-api.jup.ag/v6"
+        
         # Initialize Solana wallet from private key
         try:
             # First, try to validate and clean up the private key in case it was copied with extra characters
@@ -134,17 +145,6 @@ class SolanaRealTrader:
         except Exception as e:
             logger.error(f"Error initializing wallet: {str(e)}")
             raise ValueError(f"Failed to initialize wallet: {str(e)}")
-        
-        # Initialize Solana RPC endpoint with backup options
-        self.solana_rpc_endpoints = [
-            "https://api.mainnet-beta.solana.com",
-            "https://solana-api.projectserum.com",
-            "https://rpc.ankr.com/solana",
-        ]
-        self.solana_rpc = self.solana_rpc_endpoints[0]
-        
-        # Initialize Jupiter API
-        self.jupiter_api = "https://quote-api.jup.ag/v6"
         
         # Check wallet balance
         balance = self.check_wallet_balance()
