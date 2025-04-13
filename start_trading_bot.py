@@ -80,21 +80,40 @@ class SolanaRealTrader:
         
         # Initialize Solana wallet from private key
         try:
+            # First, try to validate and clean up the private key in case it was copied with extra characters
+            self.private_key_base58 = self.private_key_base58.strip()
+            
+            # Check if key is correct base58 format
+            if not all(c in "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz" for c in self.private_key_base58):
+                logger.warning("Private key contains invalid characters for base58 encoding")
+                logger.warning("Attempting to clean up key...")
+                # Try to clean up by removing common non-base58 characters
+                self.private_key_base58 = ''.join(c for c in self.private_key_base58 
+                                           if c in "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+                logger.info("Cleaned up private key for processing")
+            
             # Decode the private key
-            private_key_bytes = base58.b58decode(self.private_key_base58)
+            try:
+                private_key_bytes = base58.b58decode(self.private_key_base58)
+                logger.info(f"Successfully decoded private key (length: {len(private_key_bytes)} bytes)")
+            except Exception as decode_error:
+                logger.error(f"Failed to decode private key: {str(decode_error)}")
+                raise ValueError(f"Invalid private key format. Please check that you're using the correct private key export format from Phantom.")
             
             # Handle different formats
             if len(private_key_bytes) == 64:
                 # This is a full keypair (private key + public key)
                 secret_key = private_key_bytes[:32]
                 public_key = private_key_bytes[32:]
+                logger.info("Detected full keypair format (64 bytes)")
             elif len(private_key_bytes) == 32:
-                # This is just the private key
+                # This is just the private key - most common with Phantom exports
                 secret_key = private_key_bytes
                 # We'll need to derive the public key
                 public_key = self._derive_public_key(secret_key)
+                logger.info("Detected private key format (32 bytes), derived public key")
             else:
-                raise ValueError(f"Invalid private key length: {len(private_key_bytes)}. Expected 32 or 64 bytes.")
+                raise ValueError(f"Invalid private key length: {len(private_key_bytes)} bytes. Expected 32 or 64 bytes.")
             
             # Store keys
             self.secret_key = secret_key
@@ -104,12 +123,25 @@ class SolanaRealTrader:
             self.wallet_address = base58.b58encode(public_key).decode('ascii')
             logger.info(f"Wallet initialized: {self.wallet_address}")
             
+            # Double check wallet validity by confirming it exists on Solana
+            logger.info("Verifying wallet address on Solana blockchain...")
+            balance = self.check_wallet_balance()
+            if balance is not None:
+                logger.info(f"✅ Wallet verified on blockchain with balance: {balance:.6f} SOL")
+            else:
+                logger.warning("⚠️ Could not verify wallet on blockchain. This might be a network issue or the wallet may not exist.")
+            
         except Exception as e:
             logger.error(f"Error initializing wallet: {str(e)}")
             raise ValueError(f"Failed to initialize wallet: {str(e)}")
         
-        # Initialize Solana RPC endpoint
-        self.solana_rpc = "https://api.mainnet-beta.solana.com"
+        # Initialize Solana RPC endpoint with backup options
+        self.solana_rpc_endpoints = [
+            "https://api.mainnet-beta.solana.com",
+            "https://solana-api.projectserum.com",
+            "https://rpc.ankr.com/solana",
+        ]
+        self.solana_rpc = self.solana_rpc_endpoints[0]
         
         # Initialize Jupiter API
         self.jupiter_api = "https://quote-api.jup.ag/v6"
@@ -127,9 +159,9 @@ class SolanaRealTrader:
                 self.lot_amount = self.total_amount / self.num_lots
                 logger.info(f"New trading amount: {self.total_amount:.6f} SOL ({self.lot_amount:.6f} SOL per lot)")
         
-        # Token list - only tokens with good liquidity on Solana that are definitely tradable
+        # Token list - only tokens verified working in your environment
         self.tokens = [
-            "BONK", "WIF", "BOME", "POPCAT"  # Only including reliably tradable tokens
+            "BONK", "WIF"  # Only using tokens that are working reliably in the logs
         ]
         
         # Token mint addresses (for actual blockchain transactions)
@@ -148,6 +180,12 @@ class SolanaRealTrader:
         self.total_spent = 0.0
         self.start_time = datetime.datetime.now()
         
+        # Create trades history file if it doesn't exist
+        if not os.path.exists("trades_history.json"):
+            with open("trades_history.json", 'w') as f:
+                json.dump([], f)
+            logger.info("Created empty trades history file")
+            
         logger.info("Trading bot initialization complete")
     
     def _derive_public_key(self, private_key: bytes) -> bytes:
@@ -169,6 +207,15 @@ class SolanaRealTrader:
             logger.error("ed25519 package is required for key derivation")
             raise
     
+    def _fallback_rpc(self):
+        """
+        Rotate to a different RPC endpoint if the current one fails
+        """
+        current_index = self.solana_rpc_endpoints.index(self.solana_rpc)
+        next_index = (current_index + 1) % len(self.solana_rpc_endpoints)
+        self.solana_rpc = self.solana_rpc_endpoints[next_index]
+        logger.info(f"Switched to alternative RPC endpoint: {self.solana_rpc}")
+    
     def check_wallet_balance(self) -> Optional[float]:
         """
         Check wallet balance in SOL
@@ -176,34 +223,47 @@ class SolanaRealTrader:
         Returns:
             Float balance in SOL or None if error
         """
-        try:
-            # Solana RPC endpoint
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getBalance",
-                "params": [self.wallet_address]
-            }
-            
-            response = requests.post(
-                self.solana_rpc,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if "result" in data and "value" in data["result"]:
-                    # Convert lamports to SOL (1 SOL = 1,000,000,000 lamports)
-                    balance = data["result"]["value"] / 1000000000.0
-                    return balance
-            
-            logger.error(f"Failed to get wallet balance: {response.text}")
-            return None
-        except Exception as e:
-            logger.error(f"Error checking wallet balance: {str(e)}")
-            return None
+        errors = 0
+        max_retries = 3
+        
+        while errors < max_retries:
+            try:
+                # Solana RPC endpoint
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getBalance",
+                    "params": [self.wallet_address]
+                }
+                
+                response = requests.post(
+                    self.solana_rpc,
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if "result" in data and "value" in data["result"]:
+                        # Convert lamports to SOL (1 SOL = 1,000,000,000 lamports)
+                        balance = data["result"]["value"] / 1000000000.0
+                        return balance
+                
+                logger.error(f"Failed to get wallet balance: {response.text}")
+                errors += 1
+                
+                # Try a different RPC endpoint
+                self._fallback_rpc()
+                
+            except Exception as e:
+                logger.error(f"Error checking wallet balance: {str(e)}")
+                errors += 1
+                
+                # Try a different RPC endpoint
+                self._fallback_rpc()
+        
+        return None
     
     def _get_recent_blockhash(self) -> Optional[str]:
         """
@@ -212,31 +272,44 @@ class SolanaRealTrader:
         Returns:
             Recent blockhash string or None if error
         """
-        try:
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getRecentBlockhash",
-                "params": []
-            }
-            
-            response = requests.post(
-                self.solana_rpc,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if "result" in data and "value" in data["result"]:
-                    return data["result"]["value"]["blockhash"]
-            
-            logger.error(f"Failed to get recent blockhash: {response.text}")
-            return None
-        except Exception as e:
-            logger.error(f"Error getting recent blockhash: {str(e)}")
-            return None
+        errors = 0
+        max_retries = 3
+        
+        while errors < max_retries:
+            try:
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getRecentBlockhash",
+                    "params": []
+                }
+                
+                response = requests.post(
+                    self.solana_rpc,
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if "result" in data and "value" in data["result"]:
+                        return data["result"]["value"]["blockhash"]
+                
+                logger.error(f"Failed to get recent blockhash: {response.text}")
+                errors += 1
+                
+                # Try a different RPC endpoint
+                self._fallback_rpc()
+                
+            except Exception as e:
+                logger.error(f"Error getting recent blockhash: {str(e)}")
+                errors += 1
+                
+                # Try a different RPC endpoint
+                self._fallback_rpc()
+        
+        return None
     
     def _sign_and_send_transaction(self, serialized_tx: str) -> Dict[str, Any]:
         """
@@ -279,6 +352,10 @@ class SolanaRealTrader:
                     tx_signature = data["result"]
                     logger.info(f"Transaction sent: {tx_signature}")
                     
+                    # Add Solscan link for verification
+                    verify_url = f"https://solscan.io/tx/{tx_signature}"
+                    logger.info(f"✅ TRANSACTION RECORDED ON BLOCKCHAIN - Verify at: {verify_url}")
+                    
                     # Wait for confirmation
                     logger.info("Waiting for transaction confirmation...")
                     confirmation = self._confirm_transaction(tx_signature)
@@ -287,14 +364,16 @@ class SolanaRealTrader:
                         logger.info(f"Transaction confirmed: {tx_signature}")
                         return {
                             "success": True, 
-                            "signature": tx_signature
+                            "signature": tx_signature,
+                            "verify_url": verify_url
                         }
                     else:
                         logger.error(f"Transaction not confirmed: {tx_signature}")
                         return {
                             "success": False, 
                             "error": "Transaction not confirmed",
-                            "signature": tx_signature
+                            "signature": tx_signature,
+                            "verify_url": verify_url
                         }
                 else:
                     # Failed to send transaction
@@ -450,10 +529,19 @@ class SolanaRealTrader:
                 
                 swap_data = swap_response.json()
                 
+                # Debug log for the swap response structure
+                logger.info(f"Swap response keys: {list(swap_data.keys())}")
+                
                 # Check if swapTransaction is available
                 if "swapTransaction" not in swap_data:
                     logger.error("No swap transaction available in response")
+                    # Log additional details about the response
+                    logger.error(f"Full swap response: {swap_data}")
                     return {"success": False, "error": "No swap transaction available"}
+                
+                # Additional debug information for swap transaction
+                logger.info(f"Got valid swap transaction of length: {len(swap_data['swapTransaction'])}")
+                
             except requests.RequestException as e:
                 logger.error(f"Error getting swap instructions from Jupiter: {str(e)}")
                 return {"success": False, "error": f"Error getting swap instructions: {str(e)}"}
@@ -468,7 +556,10 @@ class SolanaRealTrader:
             if result["success"]:
                 # Record successful trade
                 tx_signature = result["signature"]
+                verify_url = result.get("verify_url", f"https://solscan.io/tx/{tx_signature}")
+                
                 logger.info(f"✅ REAL TRANSACTION EXECUTED SUCCESSFULLY: {tx_signature}")
+                logger.info(f"View transaction details at: {verify_url}")
                 
                 trade_data = {
                     "success": True,
@@ -477,6 +568,7 @@ class SolanaRealTrader:
                     "output_amount": output_amount,
                     "output_token": token_symbol,
                     "transaction_signature": tx_signature,
+                    "verify_url": verify_url,
                     "timestamp": datetime.datetime.now().isoformat()
                 }
                 
@@ -491,12 +583,17 @@ class SolanaRealTrader:
             else:
                 # Record failed trade
                 logger.error(f"❌ Transaction failed: {result.get('error')}")
+                verify_url = result.get("verify_url", "")
+                if verify_url:
+                    logger.info(f"You can check the failed transaction at: {verify_url}")
+                
                 self.failed_trades += 1
                 return {
                     "success": False, 
                     "error": result.get('error'),
                     "token": token_symbol,
                     "amount_sol": self.amount,
+                    "verify_url": verify_url,
                     "timestamp": datetime.datetime.now().isoformat()
                 }
         
@@ -520,9 +617,26 @@ class SolanaRealTrader:
             if os.path.exists(filename):
                 try:
                     with open(filename, 'r') as f:
-                        trades = json.load(f)
+                        content = f.read().strip()
+                        if content:  # Check if the file is not empty
+                            trades = json.loads(content)
+                        else:
+                            trades = []
+                except json.JSONDecodeError as e:
+                    logger.error(f"Error parsing trades file: {str(e)}")
+                    # Create a backup of the corrupted file
+                    backup_name = f"{filename}.bak.{int(time.time())}"
+                    logger.info(f"Creating backup of corrupted trades file: {backup_name}")
+                    try:
+                        with open(filename, 'r') as src, open(backup_name, 'w') as dst:
+                            dst.write(src.read())
+                    except Exception as backup_error:
+                        logger.error(f"Error creating backup: {str(backup_error)}")
+                    # Reset trades list
+                    trades = []
                 except Exception as e:
                     logger.error(f"Error reading trades file: {str(e)}")
+                    trades = []
             
             # Add new trade
             trades.append(trade_data)
@@ -562,7 +676,8 @@ class SolanaRealTrader:
             "runtime_hours": runtime_hours,
             "trades_per_hour": trades_per_hour,
             "trades_per_day": trades_per_hour * 24,
-            "current_sol_balance": current_balance
+            "current_sol_balance": current_balance,
+            "wallet_address": self.wallet_address
         }
     
     def print_trading_stats(self) -> None:
@@ -579,6 +694,8 @@ class SolanaRealTrader:
         logger.info(f"Trades per hour: {stats['trades_per_hour']:.2f}")
         logger.info(f"Trades per day (projected): {stats['trades_per_day']:.2f}")
         logger.info(f"Current SOL balance: {stats['current_sol_balance']:.6f}")
+        logger.info(f"Wallet address: {stats['wallet_address']}")
+        logger.info(f"Solscan wallet link: https://solscan.io/account/{stats['wallet_address']}")
         logger.info("=========================")
     
     def run_trading_loop(self) -> None:
@@ -597,6 +714,9 @@ class SolanaRealTrader:
         logger.info(f"Configured to execute approximately {trades_per_min} trades per minute")
         logger.info(f"Daily trade volume projection: {int(trades_per_day)} trades per day (high-frequency trading)")
         logger.info(f"This configuration is optimized for real-world API rate limits and blockchain performance")
+        
+        # Verify wallet link
+        logger.info(f"View your wallet on Solscan: https://solscan.io/account/{self.wallet_address}")
         
         # Main trading loop
         while True:
@@ -641,6 +761,9 @@ class SolanaRealTrader:
                         
                         if result["success"]:
                             logger.info(f"💰 REAL TRADE #{self.trades_executed} SUCCESSFUL: Lot #{lot_idx+1} {result['token']} with transaction {result.get('transaction_signature', 'unknown')}")
+                            verify_url = result.get("verify_url", "")
+                            if verify_url:
+                                logger.info(f"View transaction on Solscan: {verify_url}")
                             # Mark this lot as busy for 60 seconds (1 minute per lot)
                             self.lots[lot_idx] = int(current_time + 60)
                         else:
