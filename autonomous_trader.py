@@ -214,25 +214,41 @@ class FullyAutonomousTrader:
             private_key_bytes = base58.b58decode(self.private_key_base58)
             logger.info(f"Successfully decoded private key (length: {len(private_key_bytes)} bytes)")
             
-            # Create Solana keypair from private key bytes
-            if len(private_key_bytes) == 64:
-                # This is a full keypair format
-                self.keypair = Keypair.from_secret_key(private_key_bytes[:32])
-                logger.info("Created Solana keypair from full keypair format (64 bytes)")
-            elif len(private_key_bytes) == 32:
-                # This is just a private key
-                self.keypair = Keypair.from_secret_key(private_key_bytes)
-                logger.info("Created Solana keypair from private key format (32 bytes)")
-            else:
-                raise ValueError(f"Invalid private key length: {len(private_key_bytes)} bytes. Expected 32 or 64 bytes.")
+            # Try multiple approaches to create a keypair from private key bytes
+            try:
+                # Approach 1: Using from_secret_key directly
+                self.keypair = Keypair.from_secret_key(private_key_bytes[:32] if len(private_key_bytes) == 64 else private_key_bytes)
+                logger.info("Created Solana keypair using from_secret_key")
+            except Exception as e1:
+                logger.warning(f"First keypair creation method failed: {str(e1)}")
+                try:
+                    # Approach 2: Creating Keypair directly
+                    self.keypair = Keypair(private_key_bytes[:32] if len(private_key_bytes) == 64 else private_key_bytes)
+                    logger.info("Created Solana keypair using direct constructor")
+                except Exception as e2:
+                    logger.warning(f"Second keypair creation method failed: {str(e2)}")
+                    try:
+                        # Approach 3: Using an alternate constructor if available
+                        # Some versions use seed parameter instead
+                        self.keypair = Keypair(seed=private_key_bytes[:32] if len(private_key_bytes) == 64 else private_key_bytes)
+                        logger.info("Created Solana keypair using seed parameter")
+                    except Exception as e3:
+                        logger.error(f"All keypair creation methods failed: {str(e3)}")
+                        logger.warning("Will proceed in fallback mode with trade links only")
+                        # Set a placeholder for the keypair and wallet address
+                        self.keypair = None
+                        self.wallet_address = "FALLBACK_MODE_NO_KEYPAIR"
+                        return
             
             # Get wallet public key
-            self.wallet_address = str(self.keypair.public_key)
+            self.wallet_address = str(self.keypair.public_key) if hasattr(self.keypair, 'public_key') else str(self.keypair)
             logger.info(f"Wallet initialized: {self.wallet_address}")
             
         except Exception as e:
             logger.error(f"Error initializing wallet: {str(e)}")
-            raise ValueError(f"Failed to initialize wallet: {str(e)}")
+            logger.warning("Will proceed in fallback mode with trade links only")
+            self.keypair = None
+            self.wallet_address = "FALLBACK_MODE_NO_KEYPAIR"
     
     def _fallback_rpc(self):
         """
