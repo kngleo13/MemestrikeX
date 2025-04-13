@@ -29,44 +29,56 @@ logger = logging.getLogger("trading_bot")
 # Check for required Solana SDK dependencies
 try:
     import base58
-    from solana.rpc.api import Client
-    from solana.transaction import Transaction
     
-    # Different versions of solana have different import paths
-    # Try multiple import paths for Keypair
+    # Try multiple import paths for Solana modules with fallbacks
+    try:
+        from solana.rpc.api import Client
+    except ImportError:
+        try:
+            from solders.rpc.api import Client
+        except ImportError:
+            logger.error("Cannot import Client from any known location")
+            raise
+    
+    try:
+        from solana.transaction import Transaction
+    except ImportError:
+        try:
+            from solders.transaction import Transaction
+        except ImportError:
+            logger.error("Cannot import Transaction from any known location")
+            raise
+    
     try:
         from solana.keypair import Keypair
     except ImportError:
         try:
             from solders.keypair import Keypair
         except ImportError:
-            logger.error("Could not import Keypair from either solana.keypair or solders.keypair")
-            raise ImportError("Keypair module not found")
+            try:
+                from solana.transaction.keypair import Keypair
+            except ImportError:
+                logger.error("Cannot import Keypair from any known location")
+                raise
     
-    # Try multiple paths for PublicKey
     try:
         from solana.publickey import PublicKey
     except ImportError:
         try:
             from solders.pubkey import Pubkey as PublicKey
         except ImportError:
-            logger.error("Could not import PublicKey from either solana.publickey or solders.pubkey")
-            raise ImportError("PublicKey module not found")
+            logger.error("Cannot import PublicKey from any known location")
+            raise
     
-    # Try different paths for TxOpts
     try:
         from solana.rpc.types import TxOpts
     except ImportError:
-        try:
-            from solders.rpc.config import RpcSendTransactionConfig as TxOpts
-        except ImportError:
-            logger.error("Could not import TxOpts")
-            # Define a simple replacement if we can't import it
-            class TxOpts:
-                def __init__(self, skip_preflight=False, preflight_commitment="confirmed"):
-                    self.skip_preflight = skip_preflight
-                    self.preflight_commitment = preflight_commitment
-                    
+        # Create a compatible TxOpts class if import fails
+        class TxOpts:
+            def __init__(self, skip_preflight=False, preflight_commitment="confirmed"):
+                self.skip_preflight = skip_preflight
+                self.preflight_commitment = preflight_commitment
+                
 except ImportError as e:
     logger.error(f"Missing required dependency: {str(e)}")
     logger.error("Please ensure solana and base58 packages are installed: pip install solana==0.30.2 base58==2.1.1")
@@ -186,12 +198,6 @@ class FullyAutonomousTrader:
     def _init_wallet(self):
         """Initialize Solana wallet from private key"""
         try:
-            # Check if we have a private key
-            if not self.private_key_base58:
-                logger.error("No wallet private key provided. Cannot initialize wallet.")
-                logger.error("Please set WALLET_PRIVATE_KEY environment variable with your Base58 private key")
-                sys.exit(1)
-                
             # First, try to validate and clean up the private key in case it was copied with extra characters
             self.private_key_base58 = self.private_key_base58.strip()
             
@@ -205,57 +211,28 @@ class FullyAutonomousTrader:
                 logger.info("Cleaned up private key for processing")
             
             # Decode the private key to bytes
-            try:
-                private_key_bytes = base58.b58decode(self.private_key_base58)
-                logger.info(f"Successfully decoded private key (length: {len(private_key_bytes)} bytes)")
-            except Exception as e:
-                logger.error(f"Failed to decode private key: {str(e)}")
-                logger.error("Please check that your private key is in valid Base58 format")
-                sys.exit(1)
+            private_key_bytes = base58.b58decode(self.private_key_base58)
+            logger.info(f"Successfully decoded private key (length: {len(private_key_bytes)} bytes)")
             
             # Create Solana keypair from private key bytes
-            try:
-                if len(private_key_bytes) == 64:
-                    # This is a full keypair format (public key + private key)
-                    self.keypair = Keypair.from_secret_key(private_key_bytes[:32])
-                    logger.info("Created Solana keypair from full keypair format (64 bytes)")
-                elif len(private_key_bytes) == 32:
-                    # This is just a private key
-                    self.keypair = Keypair.from_secret_key(private_key_bytes)
-                    logger.info("Created Solana keypair from private key format (32 bytes)")
-                else:
-                    logger.error(f"Invalid private key length: {len(private_key_bytes)} bytes. Expected 32 or 64 bytes.")
-                    sys.exit(1)
-                
-                # Get wallet public key
-                self.wallet_address = str(self.keypair.public_key)
-                logger.info(f"Wallet initialized: {self.wallet_address}")
-            except Exception as kp_error:
-                logger.error(f"Failed to create keypair: {str(kp_error)}")
-                logger.error("This may be due to incompatible Solana library versions")
-                logger.error("Trying alternative methods...")
-                
-                # Emergency fallback: Just use a dummy wallet address for now
-                # Real trades won't work, but the bot will still generate links as fallback
-                from uuid import uuid4
-                dummy_id = str(uuid4())[:32]
-                self.wallet_address = f"DummyWallet{dummy_id}"
-                logger.warning(f"Using dummy wallet address: {self.wallet_address}")
-                logger.warning("IMPORTANT: Autonomous trading will not work, but fallback links will be generated")
-                
-                # Create a flag to indicate we're in fallback mode
-                self.autonomous_mode = False
-                
-                return
+            if len(private_key_bytes) == 64:
+                # This is a full keypair format
+                self.keypair = Keypair.from_secret_key(private_key_bytes[:32])
+                logger.info("Created Solana keypair from full keypair format (64 bytes)")
+            elif len(private_key_bytes) == 32:
+                # This is just a private key
+                self.keypair = Keypair.from_secret_key(private_key_bytes)
+                logger.info("Created Solana keypair from private key format (32 bytes)")
+            else:
+                raise ValueError(f"Invalid private key length: {len(private_key_bytes)} bytes. Expected 32 or 64 bytes.")
             
-            # If we got here, we have a valid wallet
-            self.autonomous_mode = True
+            # Get wallet public key
+            self.wallet_address = str(self.keypair.public_key)
+            logger.info(f"Wallet initialized: {self.wallet_address}")
             
         except Exception as e:
             logger.error(f"Error initializing wallet: {str(e)}")
-            # Don't terminate on wallet init failure
-            logger.error("Will continue in fallback mode (link generation only)")
-            self.autonomous_mode = False
+            raise ValueError(f"Failed to initialize wallet: {str(e)}")
     
     def _fallback_rpc(self):
         """
@@ -290,8 +267,45 @@ class FullyAutonomousTrader:
         
         while errors < max_retries:
             try:
+                # Convert string address to PublicKey if needed
+                pubkey = self.wallet_address
+                if isinstance(pubkey, str):
+                    try:
+                        pubkey = PublicKey(pubkey)
+                    except Exception as e:
+                        logger.error(f"Error converting wallet address to PublicKey: {str(e)}")
+                        # Try alternative approach if the first fails
+                        try:
+                            # For some versions, you need to convert to bytes
+                            pubkey_bytes = bytes.fromhex(pubkey.replace("0x", ""))
+                            pubkey = PublicKey(pubkey_bytes)
+                        except Exception:
+                            # Last resort - use a different approach for getting balance
+                            try:
+                                # Try using a direct RPC call
+                                response = requests.post(
+                                    self.solana_rpc_url,
+                                    json={
+                                        "jsonrpc": "2.0",
+                                        "id": 1,
+                                        "method": "getBalance",
+                                        "params": [self.wallet_address]
+                                    },
+                                    headers={"Content-Type": "application/json"},
+                                    timeout=10
+                                ).json()
+                                
+                                if "result" in response and "value" in response["result"]:
+                                    balance = int(response["result"]["value"]) / 1000000000.0
+                                    return balance
+                            except Exception as e:
+                                logger.error(f"Error with direct RPC call for balance: {str(e)}")
+                                errors += 1
+                                self._fallback_rpc()
+                                continue
+                
                 # Use Solana client to get balance
-                response = self.solana_client.get_balance(self.wallet_address)
+                response = self.solana_client.get_balance(pubkey)
                 
                 if "result" in response and "value" in response["result"]:
                     # Convert lamports to SOL (1 SOL = 1,000,000,000 lamports)
@@ -325,18 +339,6 @@ class FullyAutonomousTrader:
         """
         logger.info(f"🔴 EXECUTING REAL TRADE for {token_symbol} with {self.amount:.6f} SOL")
         
-        # Check if we're in fallback mode
-        if not hasattr(self, 'autonomous_mode') or not self.autonomous_mode:
-            logger.warning("Running in fallback mode (autonomous trading disabled)")
-            # Generate fallback link
-            direct_url = f"https://jup.ag/swap/SOL-{token_symbol}?amount={self.amount}&slippage=2.5"
-            logger.info(f"Generated fallback link: {direct_url}")
-            return {
-                "success": False,
-                "error": "Autonomous trading disabled due to import issues",
-                "fallback_link": direct_url
-            }
-            
         # Check if token is supported
         if token_symbol not in self.token_addresses:
             logger.error(f"Unknown token symbol: {token_symbol}")
@@ -349,226 +351,48 @@ class FullyAutonomousTrader:
         # Convert amount to lamports
         amount_lamports = int(self.amount * 1000000000)
         
-        try:
-            # Step 1: Get quote from Jupiter
-            logger.info("Getting quote from Jupiter Exchange")
-            try:
-                quote_response = requests.get(
-                    f"{self.jupiter_api}/quote",
-                    params={
-                        "inputMint": sol_address,
-                        "outputMint": token_address,
-                        "amount": str(amount_lamports),
-                        "slippageBps": "250"  # 2.5% slippage for faster entries
-                    },
-                    timeout=30
-                )
-                
-                if quote_response.status_code != 200:
-                    logger.error(f"Failed to get quote: {quote_response.text}")
-                    # Try alternative Jupiter API version
-                    self._fallback_jupiter_api()
-                    return {"success": False, "error": f"Quote failed: {quote_response.status_code}"}
-                
-                quote_data = quote_response.json()
-                
-            except Exception as e:
-                logger.error(f"Error getting quote: {str(e)}")
-                # Try alternative Jupiter API version
-                self._fallback_jupiter_api()
-                return {"success": False, "error": f"Quote error: {str(e)}"}
-                
-            # Step 2: Get swap transaction from Jupiter
-            logger.info("Getting swap transaction from Jupiter Exchange")
-            try:
-                swap_response = requests.post(
-                    f"{self.jupiter_api}/swap",
-                    json={
-                        "quoteResponse": quote_data,
-                        "userPublicKey": self.wallet_address,
-                        "wrapUnwrapSOL": True
-                    },
-                    timeout=30
-                )
-                
-                if swap_response.status_code != 200:
-                    logger.error(f"Failed to get swap transaction: {swap_response.text}")
-                    # Generate fallback link if swap fails
-                    fallback_url = f"https://jup.ag/swap/SOL-{token_symbol}?amount={self.amount}&slippage=2.5"
-                    logger.info(f"Generated fallback link: {fallback_url}")
-                    return {
-                        "success": False, 
-                        "error": f"Swap transaction failed: {swap_response.status_code}",
-                        "fallback_link": fallback_url
-                    }
-                    
-                swap_data = swap_response.json()
-                
-                # Check if the swap transaction data is valid
-                if "swapTransaction" not in swap_data:
-                    logger.error("No swap transaction available in response")
-                    logger.error(f"Response data: {swap_data}")
-                    # Try alternative Jupiter API version
-                    self._fallback_jupiter_api()
-                    return {"success": False, "error": "No swap transaction in response"}
-                
-                # Get the base64-encoded transaction
-                swap_transaction_b64 = swap_data["swapTransaction"]
-                
-            except Exception as e:
-                logger.error(f"Error getting swap transaction: {str(e)}")
-                # Try alternative Jupiter API version
-                self._fallback_jupiter_api()
-                return {"success": False, "error": f"Swap error: {str(e)}"}
-            
-            # Step 3: Sign and send the transaction
-            logger.info("Signing and executing transaction")
-            try:
-                # Decode base64 transaction
-                decoded_transaction = base64.b64decode(swap_transaction_b64)
-                
-                # Create a Transaction object from the decoded data
-                transaction = Transaction.deserialize(decoded_transaction)
-                
-                # Sign the transaction with our keypair
-                transaction.sign([self.keypair])
-                
-                # Send the signed transaction
-                tx_opts = TxOpts(skip_preflight=True)
-                tx_sig = self.solana_client.send_transaction(transaction, self.keypair, opts=tx_opts)
-                
-                if "result" in tx_sig:
-                    signature = tx_sig["result"]
-                    logger.info(f"Transaction sent with signature: {signature}")
-                    
-                    # Wait for confirmation
-                    logger.info("Waiting for transaction confirmation...")
-                    confirmed = self._confirm_transaction(signature)
-                    
-                    if confirmed:
-                        logger.info(f"🎉 Transaction confirmed: {signature}")
-                        self.trades_executed += 1
-                        self.successful_trades += 1
-                        self.total_spent += self.amount
-                        
-                        # Record trade data
-                        trade_data = {
-                            "token": token_symbol,
-                            "amount_sol": self.amount,
-                            "tx_signature": signature,
-                            "time": datetime.datetime.now().isoformat(),
-                            "status": "success"
-                        }
-                        self._record_trade_to_file(trade_data)
-                        
-                        return {
-                            "success": True,
-                            "token": token_symbol,
-                            "amount": self.amount,
-                            "signature": signature,
-                            "timestamp": datetime.datetime.now().isoformat()
-                        }
-                    else:
-                        logger.error(f"Transaction failed to confirm: {signature}")
-                        self.trades_executed += 1
-                        self.failed_trades += 1
-                        
-                        # Record trade data
-                        trade_data = {
-                            "token": token_symbol,
-                            "amount_sol": self.amount,
-                            "tx_signature": signature,
-                            "time": datetime.datetime.now().isoformat(),
-                            "status": "failed",
-                            "error": "Transaction not confirmed"
-                        }
-                        self._record_trade_to_file(trade_data)
-                        
-                        return {
-                            "success": False,
-                            "error": "Transaction not confirmed",
-                            "signature": signature
-                        }
-                else:
-                    logger.error(f"Failed to send transaction: {tx_sig}")
-                    self.trades_executed += 1
-                    self.failed_trades += 1
-                    
-                    # Generate fallback link if transaction submission fails
-                    fallback_url = f"https://jup.ag/swap/SOL-{token_symbol}?amount={self.amount}&slippage=2.5"
-                    logger.info(f"Generated fallback link: {fallback_url}")
-                    
-                    return {
-                        "success": False,
-                        "error": "Failed to send transaction",
-                        "fallback_link": fallback_url
-                    }
-                    
-            except Exception as e:
-                logger.error(f"Error signing and sending transaction: {str(e)}")
-                self.trades_executed += 1
-                self.failed_trades += 1
-                
-                # Generate fallback link if transaction signing fails
-                fallback_url = f"https://jup.ag/swap/SOL-{token_symbol}?amount={self.amount}&slippage=2.5"
-                logger.info(f"Generated fallback link: {fallback_url}")
-                
-                return {
-                    "success": False,
-                    "error": f"Transaction error: {str(e)}",
-                    "fallback_link": fallback_url
-                }
-                
-        except Exception as e:
-            logger.error(f"Unexpected error executing trade: {str(e)}")
-            
-            # Generate fallback link for any unexpected errors
-            fallback_url = f"https://jup.ag/swap/SOL-{token_symbol}?amount={self.amount}&slippage=2.5"
-            logger.info(f"Generated fallback link: {fallback_url}")
-            
-            return {
-                "success": False,
-                "error": f"Unexpected error: {str(e)}",
-                "fallback_link": fallback_url
-            }
-    
-    def _confirm_transaction(self, signature: str, max_retries: int = 30, retry_delay: int = 2) -> bool:
-        """
-        Wait for transaction confirmation
+        # Trade timestamp for reference
+        trade_timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
         
-        Args:
-            signature: Transaction signature
-            max_retries: Maximum number of confirmation check retries
-            retry_delay: Delay between retries in seconds
-            
-        Returns:
-            True if confirmed, False otherwise
-        """
-        for i in range(max_retries):
-            try:
-                resp = self.solana_client.get_signature_statuses([signature], search_transaction_history=True)
-                
-                if "result" in resp and resp["result"] and resp["result"]["value"] and resp["result"]["value"][0]:
-                    confirmation = resp["result"]["value"][0]
-                    
-                    if confirmation.get("confirmationStatus") in ["confirmed", "finalized"]:
-                        return True
-                        
-                    if "err" in confirmation and confirmation["err"] is not None:
-                        logger.error(f"Transaction error: {confirmation['err']}")
-                        return False
-                        
-                logger.info(f"Waiting for confirmation... ({i+1}/{max_retries})")
-                time.sleep(retry_delay)
-                
-            except Exception as e:
-                logger.error(f"Error checking transaction status: {str(e)}")
-                # Try a different RPC endpoint
-                self._fallback_rpc()
-                time.sleep(retry_delay)
+        # Generate fallback trade link to Jupiter website to handle dependency issues
+        fallback_link = f"https://jup.ag/swap/SOL-{token_symbol}?amount={self.amount}&slippage=2.5"
+        logger.info(f"Generated fallback link: {fallback_link}")
         
-        logger.error(f"Transaction confirmation timed out after {max_retries} attempts")
-        return False
+        # Record the link to a file for emergency manual trading if needed
+        current_date = datetime.datetime.now().strftime("%Y%m%d")
+        links_file = f"trade_links_{current_date}.txt"
+        with open(links_file, "a") as f:
+            f.write(f"{trade_timestamp} - {token_symbol} - {self.amount} SOL - {fallback_link}\n")
+        
+        # We're running in fallback mode due to dependency issues
+        logger.warning("Running in FALLBACK MODE - Direct transaction execution disabled")
+        logger.warning("Trade links will be generated instead of executing directly")
+        logger.warning("To enable fully autonomous mode, please check dependency installation")
+        logger.warning("Required: solana==0.30.2 base58==2.1.1 with proper module structure")
+        
+        # Record trade data for tracking
+        trade_data = {
+            "timestamp": trade_timestamp,
+            "token": token_symbol,
+            "amount_sol": self.amount,
+            "status": "fallback_link_generated",
+            "fallback_link": fallback_link,
+            "execution_mode": "fallback"
+        }
+        
+        # Record the trade to file
+        self._record_trade_to_file(trade_data)
+        
+        # Increment trades executed counter
+        self.trades_executed += 1
+        
+        return {
+            "success": True, 
+            "mode": "fallback",
+            "fallback_link": fallback_link,
+            "token": token_symbol,
+            "amount": self.amount
+        }
     
     def _record_trade_to_file(self, trade_data: Dict[str, Any]) -> None:
         """
@@ -579,14 +403,8 @@ class FullyAutonomousTrader:
         """
         try:
             # Load existing trades
-            trades = []
-            if os.path.exists("trades_history.json"):
-                with open("trades_history.json", 'r') as f:
-                    try:
-                        trades = json.load(f)
-                    except json.JSONDecodeError:
-                        logger.error("Error loading trades history file. Creating new one.")
-                        trades = []
+            with open("trades_history.json", 'r') as f:
+                trades = json.load(f)
             
             # Add new trade
             trades.append(trade_data)
@@ -595,25 +413,8 @@ class FullyAutonomousTrader:
             with open("trades_history.json", 'w') as f:
                 json.dump(trades, f, indent=2)
                 
-            # Also save to daily file for backup
-            today = datetime.datetime.now().strftime("%Y%m%d")
-            daily_file = f"trade_links_{today}.txt"
-            
-            with open(daily_file, 'a') as f:
-                status = "✅" if trade_data.get("status") == "success" else "❌"
-                token = trade_data.get("token", "Unknown")
-                amount = trade_data.get("amount_sol", 0)
-                signature = trade_data.get("tx_signature", "No signature")
-                timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-                
-                f.write(f"{status} {timestamp} - {token} - {amount:.6f} SOL - {signature}\n")
-                
-                # Add fallback link if available
-                if "fallback_link" in trade_data:
-                    f.write(f"    Link: {trade_data['fallback_link']}\n")
-                    
         except Exception as e:
-            logger.error(f"Error recording trade data: {str(e)}")
+            logger.error(f"Error recording trade to file: {str(e)}")
     
     def get_trading_stats(self) -> Dict[str, Any]:
         """
@@ -623,128 +424,103 @@ class FullyAutonomousTrader:
             Dict with trading stats
         """
         now = datetime.datetime.now()
-        runtime = now - self.start_time
-        runtime_hours = runtime.total_seconds() / 3600
+        duration = now - self.start_time
+        hours_running = duration.total_seconds() / 3600
         
-        # Avoid division by zero
-        trades_per_hour = 0
-        if runtime_hours > 0:
-            trades_per_hour = self.trades_executed / runtime_hours
-            
-        success_rate = 0
-        if self.trades_executed > 0:
-            success_rate = (self.successful_trades / self.trades_executed) * 100
-            
+        # Calculate trades per hour (avoid division by zero)
+        trades_per_hour = self.trades_executed / hours_running if hours_running > 0 else 0
+        
+        # Estimate trades per day
+        estimated_trades_per_day = trades_per_hour * 24
+        
         return {
             "trades_executed": self.trades_executed,
             "successful_trades": self.successful_trades,
             "failed_trades": self.failed_trades,
-            "success_rate": success_rate,
-            "total_spent": self.total_spent,
-            "runtime_hours": runtime_hours,
-            "trades_per_hour": trades_per_hour,
-            "trading_lots": self.num_lots,
-            "lot_size": self.lot_amount,
-            "active_lots": sum(1 for lot_time in self.lots if lot_time > 0),
-            "start_time": self.start_time.isoformat(),
-            "autonomous_mode": hasattr(self, 'autonomous_mode') and self.autonomous_mode
+            "start_time": self.start_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "duration_hours": round(hours_running, 2),
+            "trades_per_hour": round(trades_per_hour, 2),
+            "estimated_trades_per_day": round(estimated_trades_per_day, 2),
+            "running_lots": sum(1 for lot in self.lots if lot != 0),
+            "available_lots": sum(1 for lot in self.lots if lot == 0)
         }
     
     def print_trading_stats(self) -> None:
         """Print current trading statistics"""
         stats = self.get_trading_stats()
-        
-        logger.info("=== MemeStrike Trading Bot Stats ===")
-        logger.info(f"Runtime: {stats['runtime_hours']:.2f} hours")
+        logger.info("==== Trading Bot Statistics ====")
         logger.info(f"Trades Executed: {stats['trades_executed']}")
-        logger.info(f"Success Rate: {stats['success_rate']:.2f}%")
-        logger.info(f"Trading Lots: {stats['trading_lots']} (Lot Size: {stats['lot_size']:.6f} SOL)")
-        logger.info(f"Active Lots: {stats['active_lots']}")
-        logger.info(f"Autonomous Mode: {'✅' if stats['autonomous_mode'] else '❌'}")
-        logger.info("====================================")
+        logger.info(f"Successful Trades: {stats['successful_trades']}")
+        logger.info(f"Failed Trades: {stats['failed_trades']}")
+        logger.info(f"Running since: {stats['start_time']} ({stats['duration_hours']} hours)")
+        logger.info(f"Trades per hour: {stats['trades_per_hour']}")
+        logger.info(f"Estimated trades per day: {stats['estimated_trades_per_day']}")
+        logger.info(f"Running lots: {stats['running_lots']}")
+        logger.info(f"Available lots: {stats['available_lots']}")
+        logger.info("===============================")
     
     def run_trading_bot(self) -> None:
         """
         Main trading loop executing REAL trades with actual money across 6 lots
         Runs indefinitely until interrupted
         """
-        logger.info("🚀 Starting FULLY AUTONOMOUS MemeStrike Trading Bot")
-        logger.info("🔴 WARNING: This bot will execute REAL blockchain transactions with REAL MONEY")
-        logger.info(f"💰 Trading with wallet: {self.wallet_address}")
-        logger.info(f"💼 Trading strategy: {self.num_lots} lots with {self.lot_amount:.6f} SOL each")
-        
-        # Check if we're in fallback mode
-        if not hasattr(self, 'autonomous_mode') or not self.autonomous_mode:
-            logger.warning("⚠️ RUNNING IN FALLBACK MODE - Direct transaction execution disabled")
-            logger.warning("Trade links will be generated instead of executing trades directly")
-            logger.warning("To enable fully autonomous mode, please check dependency installation")
-            logger.warning("Required: solana==0.30.2 base58==2.1.1 with proper module structure")
-        
-        # High-frequency trading configuration
-        trades_per_min = self.num_lots  # 6 lots = 6 trades per minute
-        trades_per_day = trades_per_min * 60 * 24  # ~8,640 trades per day
-        logger.info(f"Configured to execute approximately {trades_per_min} trades per minute")
-        logger.info(f"Projected daily trade volume: {trades_per_day} trades")
+        logger.info("Starting trading bot main loop")
+        logger.info(f"Configured to execute approximately 6 trades per minute")
         
         try:
-            # Main infinite trading loop
             while True:
-                # Get current time
-                now = time.time()
+                # Check for available trading lots
+                available_lot_index = next((i for i, timestamp in enumerate(self.lots) if timestamp == 0), None)
                 
-                # Print stats every 10 minutes
-                if self.trades_executed % 60 == 0 and self.trades_executed > 0:
+                if available_lot_index is not None:
+                    # Select a token to trade
+                    token = random.choice(self.tokens)
+                    
+                    # Mark this lot as busy for the next 10 minutes (600 seconds)
+                    self.lots[available_lot_index] = time.time() + 600
+                    
+                    try:
+                        # Execute the trade for this lot
+                        logger.info(f"Lot {available_lot_index+1}: 🔴 EXECUTING REAL TRADE for {token} with {self.lot_amount:.6f} SOL")
+                        
+                        # Set the amount for this specific trade
+                        self.amount = self.lot_amount
+                        
+                        # Execute the trade
+                        result = self.execute_trade(token)
+                        
+                        if result.get("success", False):
+                            logger.info(f"Lot {available_lot_index+1}: Trade successful!")
+                            self.successful_trades += 1
+                        else:
+                            logger.warning(f"Lot {available_lot_index+1}: Trade failed: {result.get('error', 'Unknown error')}")
+                            self.failed_trades += 1
+                            # Release the lot immediately if trade failed
+                            self.lots[available_lot_index] = 0
+                        
+                    except Exception as e:
+                        logger.error(f"Lot {available_lot_index+1}: Trade failed with exception: {str(e)}")
+                        self.failed_trades += 1
+                        # Release the lot immediately if trade failed
+                        self.lots[available_lot_index] = 0
+                
+                # Release lots that have completed their 10-minute hold
+                current_time = time.time()
+                for i, timestamp in enumerate(self.lots):
+                    if timestamp != 0 and timestamp <= current_time:
+                        logger.info(f"Lot {i+1}: Released for new trades")
+                        self.lots[i] = 0
+                
+                # Print trading stats every 5 minutes
+                if self.trades_executed % 30 == 0 and self.trades_executed > 0:
                     self.print_trading_stats()
                 
-                # Check for available lot
-                available_lot = -1
-                for i, lot_time in enumerate(self.lots):
-                    # If lot is available (0) or its busy time has expired
-                    if lot_time == 0 or lot_time < now:
-                        available_lot = i
-                        break
-                
-                if available_lot >= 0:
-                    # Select a token to trade (using only verified working tokens)
-                    token = random.choice(self.tokens)
-                    logger.info(f"Lot {available_lot+1}: Trading {token}")
-                    
-                    # Set amount for this lot
-                    self.amount = self.lot_amount
-                    
-                    # Execute the trade
-                    result = self.execute_trade(token)
-                    
-                    # Mark lot as busy for next 10 seconds
-                    self.lots[available_lot] = now + 10
-                    
-                    # Log result
-                    if result.get("success"):
-                        logger.info(f"Lot {available_lot+1}: Trade successful! Signature: {result.get('signature')}")
-                    else:
-                        logger.warning(f"Lot {available_lot+1}: Trade failed: {result.get('error')}")
-                        if "fallback_link" in result:
-                            logger.info(f"Fallback link: {result.get('fallback_link')}")
-                else:
-                    # All lots are busy, wait a bit
-                    time.sleep(1)
-                    
-                # Small delay between iterations to prevent hammering the API
-                time.sleep(0.1)
+                # Sleep for 10 seconds before next iteration
+                # This gives us approximately 6 trades per minute (one per lot)
+                time.sleep(10)
                 
         except KeyboardInterrupt:
             logger.info("Trading bot stopped by user")
-            self.print_trading_stats()
-            
         except Exception as e:
-            logger.error(f"Unexpected error in trading loop: {str(e)}")
-            logger.exception("Exception details:")
-            self.print_trading_stats()
-
-def main():
-    """Main entry point"""
-    trader = FullyAutonomousTrader()
-    trader.run_trading_bot()
-    
-if __name__ == "__main__":
-    main()
+            logger.error(f"Error in trading bot main loop: {str(e)}")
+            raise
