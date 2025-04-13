@@ -127,9 +127,9 @@ class SolanaRealTrader:
                 self.lot_amount = self.total_amount / self.num_lots
                 logger.info(f"New trading amount: {self.total_amount:.6f} SOL ({self.lot_amount:.6f} SOL per lot)")
         
-        # Token list - only tokens with good liquidity on Solana
+        # Token list - only tokens with good liquidity on Solana that are definitely tradable
         self.tokens = [
-            "BONK", "WIF", "BOME", "POPCAT", "JUP", "RAY"
+            "BONK", "WIF", "BOME", "POPCAT"  # Only including reliably tradable tokens
         ]
         
         # Token mint addresses (for actual blockchain transactions)
@@ -138,8 +138,6 @@ class SolanaRealTrader:
             "WIF": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
             "BOME": "F7nFu4rQbdcABg8bJkU6tRBApbREXz12pGJ1kUwHdUBs",
             "POPCAT": "POPCAT9TXGX2Z1QLQ4TZMvY3KNjywRCrDSTfNBG3czr",
-            "JUP": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvEC",
-            "RAY": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
             "SOL": "So11111111111111111111111111111111111111112"
         }
         
@@ -412,6 +410,21 @@ class SolanaRealTrader:
                 if 'outAmount' not in quote_data:
                     logger.error(f"Invalid quote data: {quote_data}")
                     return {"success": False, "error": "Invalid quote data from Jupiter API"}
+                
+                # Additional validation to catch token-specific issues
+                try:
+                    # Try to validate if the token is tradable
+                    if 'error' in quote_data:
+                        logger.error(f"Token {token_symbol} appears to have trading issues: {quote_data['error']}")
+                        return {"success": False, "error": f"Token {token_symbol} not tradable: {quote_data.get('error', 'Unknown error')}"}
+                    
+                    # Add a specific check for "not tradable" errors
+                    if quote_response.text and 'not tradable' in quote_response.text.lower():
+                        logger.error(f"Token {token_symbol} is not tradable")
+                        return {"success": False, "error": f"Token {token_symbol} is not tradable"}
+                except Exception as validation_error:
+                    logger.error(f"Error validating trade: {str(validation_error)}")
+                    # Continue with the trade attempt despite validation warning
                 
                 output_amount = int(quote_data['outAmount']) / 1e9  # Convert to decimal units
                 logger.info(f"Quote received: {self.amount} SOL -> {output_amount} {token_symbol}")
